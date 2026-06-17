@@ -62,6 +62,16 @@ def configure_interfaces(config):
                 logger.error(f"Unable to configure interface {i}: {repr(e)}")
                 raise
 
+	#  Add new interface type for the SX127x
+        elif interface_type == "sx127x":
+            try:
+                from . import lorasx127xinterface
+                i_face = lorasx127xinterface.SX127xInterface(data)
+                interfaces.append(i_face)
+            except Exception as e:
+                logger.error(f"Unable to configure interface {i}: {repr(e)}")
+                raise
+
         elif interface_type == "companion":
             try:
                 from . import companioninterface

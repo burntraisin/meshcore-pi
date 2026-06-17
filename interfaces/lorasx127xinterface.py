@@ -1,4 +1,3 @@
-
 import asyncio
 from aiotools import current_taskgroup
 import threading
@@ -9,7 +8,6 @@ from collections import deque
 from .interface import Interface
 from configuration import ConfigView, get_config
 
-from LoRaRF import SX126x
 from LoRaRF import SX127x
 
 import logging
@@ -46,14 +44,14 @@ TCXO_DELAY = {
     10: 0x0560
 }
 
-class LoRaInterface(Interface):
+class SX127xInterface(Interface):
     """
     Communicate with a directly connected LoRa interface
 
     """
     def __init__(self, config:ConfigView):
         super().__init__() 
-        self._name = "SX126x device interface"
+        self._name = "SX127x device interface"
 
         # Flag to signal when data has been transmitted
         self.txdone = asyncio.Event()
@@ -62,12 +60,12 @@ class LoRaInterface(Interface):
 
         # Fetch all the config we need
         # Default config is UK/EU Narrow
-	# Initially changed for US and Bonnet. Revert the changes back to the original.
+	# Changed config for US
         config.set_default(get_config({
-            "frequency": 915000000, "sf": 7, "bw":125000, "cr":8,
-            "txpower":13, "airtime": 10,
-            # AdaFruit Radio+OLED Bonnet for Raspberry Pi
-            "spi":0, "cs": 1, "irq":22, "reset":25
+            "frequency": 910525000, "sf": 7, "bw":62500, "cr":5,
+            "txpower": 13, "airtime": 10,
+            # AdaFruit Bonnet SX127x for Raspberry Pi
+            "spi":0, "cs": 1, "irq": 22, "reset": 25
         }))
 
         self.freq = config.get("frequency")
@@ -96,14 +94,15 @@ class LoRaInterface(Interface):
 
         self.LoRa = SX127x()
 
-        if not self.LoRa.begin(spi, cs, reset, busy, irq, txen, rxen, wake):
+        # Also need to remove pins Adafruit does not use
+        if not self.LoRa.begin(spi, cs, reset, irq, txen, rxen):
             logger.error("LoRa interface did not start")
             # FIXME - need a better exception
             raise ValueError("LoRa interface did not start")
 
         self.LoRa.setFrequency(self.freq)
-        self.LoRa.setTxPower(self.txpower)
-        self.LoRa.setRxGain(self.LoRa.RX_GAIN_BOOSTED)
+        self.LoRa.setTxPower(self.txpower, 1)
+        self.LoRa.setRxGain(1, 0) #self.LoRa.RX_GAIN_BOOSTED
         # SF, BW, CR, LDRO (low data rate optimization; off)
         self.LoRa.setLoRaModulation(self.sf, self.bw, self.cr, False)
 
