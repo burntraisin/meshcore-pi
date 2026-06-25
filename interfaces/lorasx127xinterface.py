@@ -52,7 +52,6 @@ class SX127xInterface(Interface):
     def __init__(self, config:ConfigView):
         super().__init__() 
         self._name = "SX127x device interface"
-        self.is_transmitting = False
         self._hw_lock = threading.Lock()
 
         # Flag to signal when data has been transmitted
