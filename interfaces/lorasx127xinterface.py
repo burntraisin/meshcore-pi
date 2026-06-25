@@ -52,18 +52,17 @@ class SX127xInterface(Interface):
     def __init__(self, config:ConfigView):
         super().__init__() 
         self._name = "SX127x device interface"
+        self.is_transmitting = False
+        self._hw_lock = threading.Lock()
 
         # Flag to signal when data has been transmitted
         self.txdone = asyncio.Event()
-        # Last transmit duration (ms)
         self.txtime = 0
 
-        # Fetch all the config we need
-        # Default config is UK/EU Narrow
-	# Changed config for US
+        # Config for US MeshCore
         config.set_default(get_config({
             "frequency": 910525000, "sf": 7, "bw":62500, "cr":5,
-            "txpower": 13, "airtime": 10,
+            "txpower": 17, "airtime": 100,
             # AdaFruit Bonnet SX127x for Raspberry Pi
             "spi":0, "cs": 1, "irq": 22, "reset": 25
         }))
@@ -73,51 +72,27 @@ class SX127xInterface(Interface):
         self.bw = config.get("bw")
         self.cr = config.get("cr")
         self.txpower = config.get("txpower")
-        airtime = config.get("airtime", 10)
+        airtime = config.get("airtime", 100)
 
         spi = config.get("spi")
         cs = config.get("cs")
         irq = config.get("irq")
-        busy = config.get("busy")
         reset = config.get("reset")
         txen = config.get("txen", -1)
         rxen = config.get("rxen", -1)
-        wake = config.get("wake", -1)
-
-        dio3_voltage = config.get("dio3.voltage", None)
-        dio3_txco_delay = config.get("dio3.tcxo_delay", None)
-
-        dio2_rfswitch = config.get("dio2.rfswitch", False)
-
-        if (dio3_voltage is not None and dio3_txco_delay is None) or (dio3_voltage is None and dio3_txco_delay is not None):
-            raise ValueError("Both dio3.voltage and dio3.tcxo_delay must be set to enable DIO3 control")
 
         self.LoRa = SX127x()
 
-        # Also need to remove pins Adafruit does not use
         if not self.LoRa.begin(spi, cs, reset, irq, txen, rxen):
             logger.error("LoRa interface did not start")
-            # FIXME - need a better exception
             raise ValueError("LoRa interface did not start")
 
         self.LoRa.setFrequency(self.freq)
-        self.LoRa.setTxPower(self.txpower, 1)
-        self.LoRa.setRxGain(1, 0) #self.LoRa.RX_GAIN_BOOSTED
-        # SF, BW, CR, LDRO (low data rate optimization; off)
+        # self.LoRa.setTxPower(17, self.LoRa.TX_POWER_PA_BOOST)
+        # self.LoRa.setTxPower(self.txpower, self.LoRa.TX_POWER_PA_BOOST) #self.LoRa.RX_GAIN_BOOSTED
+        self.LoRa.setTxPower(13, self.LoRa.TX_POWER_RFO)
+        self.LoRa.setRxGain(True, True)
         self.LoRa.setLoRaModulation(self.sf, self.bw, self.cr, False)
-
-        # DIO3 as TCXO control (optional)
-        if dio3_voltage is not None:
-            d3v = DIO3_VOLTAGE.get(dio3_voltage, None)
-            d3t = TCXO_DELAY.get(dio3_txco_delay, None)
-            if d3v is None or d3t is None:
-                raise ValueError("Invalid dio3.voltage or dio3.tcxo_delay value")
-
-            self.LoRa.setDio3TcxoCtrl(d3v, d3t)
-
-        # DIO2 as RF switch control (optional)
-        if dio2_rfswitch:
-            self.LoRa.setDio2RfSwitch(True)
 
         self.LoRa.setLoRaPacket(self.LoRa.HEADER_EXPLICIT, 16, 255, True, False)
         self.LoRa.setSyncWord(0x12)
@@ -129,49 +104,41 @@ class SX127xInterface(Interface):
 
         logger.debug(f"Configired LoRa interface on SPI{spi}:{cs} for {self.freq/1000000:0.3f}MHz, BW: {self.bw/1000}KHz, SF: {self.sf}, CR: {self.cr}")
 
-    # Receive thread
-    #
     # FIXME: This thread busywaits on data from the LoRa chip. This could be a setting I've missed,
     # or it might just be how the library works. Either way, it sits there using up an entire core.
     # Need either better config, a better library, or to rewrite the current one so it behaves nicely.
     def rx_thread(self):
+
         logger.debug("LoRa rx thread listening")
-
-        self.LoRa.request(self.LoRa.RX_CONTINUOUS)
-    
         s = ["STATUS_DEFAULT", "STATUS_TX_WAIT", "STATUS_TX_TIMEOUT", "STATUS_TX_DONE", "STATUS_RX_WAIT", "STATUS_RX_CONTINUOUS", "STATUS_RX_TIMEOUT", "STATUS_RX_DONE", "STATUS_HEADER_ERR", "STATUS_CRC_ERR", "STATUS_CAD_WAIT", "STATUS_CAD_DETECTED", "STATUS_CAD_DONE"]
+
+        time.sleep(2)
+
         while True:
-            self.LoRa.wait()
+            with self._hw_lock:
+                status = self.LoRa.status()
+                logger.debug(f"Status: {s[status]}")
 
-            status = self.LoRa.status()
-            logger.debug(f"Status: {s[status]}")
+                if status == self.LoRa.STATUS_RX_DONE:
+                    logger.debug(f"Packet received, {self.LoRa.available()} bytes")
+                    data = bytearray()
+                    while self.LoRa.available():
+                        data.append(self.LoRa.read())
 
-            if status == self.LoRa.STATUS_RX_DONE:
-                logger.debug(f"Packet received, {self.LoRa.available()} bytes")
+                    rssi = self.LoRa.packetRssi()
+                    snr = self.LoRa.snr()
 
-                data = bytearray()
-
-                while self.LoRa.available():
-                    data.append(self.LoRa.read())
-
-                rssi = self.LoRa.packetRssi()
-                snr = self.LoRa.snr()
-
-                self.eventloop.call_soon_threadsafe(self.rx_q.put_nowait, (data,rssi,snr))
-                logger.debug(f"Packet data, {hexlify(data).decode()}")
-                continue
-
-            elif status == self.LoRa.STATUS_CRC_ERR:
-                logger.info("RX packet CRC error")
-                continue
-            elif status == self.LoRa.STATUS_HEADER_ERR:
-                logger.info("RX packet header error")
-                continue
-
-            elif status == self.LoRa.STATUS_TX_DONE:
-                self.eventloop.call_soon_threadsafe(self.tx_done, self.LoRa.transmitTime())
-
-            self.LoRa.request(self.LoRa.RX_CONTINUOUS)
+                    self.eventloop.call_soon_threadsafe(self.rx_q.put_nowait, (data, rssi, snr))
+                    self.LoRa.writeRegister(self.LoRa.REG_IRQ_FLAGS, 0xFF) # Clear interrupts
+                    logger.debug(f"Packet data, {hexlify(data).decode()}")
+                    
+                elif status == self.LoRa.STATUS_CRC_ERR or status == self.LoRa.STATUS_HEADER_ERR:
+                    logger.info(f"RX packet error status: {s[status]}")
+                    self.LoRa.writeRegister(self.LoRa.REG_IRQ_FLAGS, 0xFF)
+                    
+                elif status == self.LoRa.STATUS_TX_DONE:
+                    self.eventloop.call_soon_threadsafe(self.tx_done, self.LoRa.transmitTime())
+                    self.LoRa.writeRegister(self.LoRa.REG_IRQ_FLAGS, 0xFF)
 
     # FIXME race condition here - what is the proper timeout for a transmission?
     def tx_done(self, tx_time):
@@ -212,13 +179,20 @@ class SX127xInterface(Interface):
 
     async def transmit(self, packetdata):
         logger.debug(f"Transmitting: {hexlify(packetdata).decode()}")
+
+        payload_len = len(packetdata)
+        logger.debug(f"The payload length is {payload_len}")
                 
         self.txdone.clear()
         self.txtime = 0
 
-        self.LoRa.beginPacket()
-        self.LoRa.put(packetdata)
-        self.LoRa.endPacket()
+        def _safe_tx():
+            with self._hw_lock:
+                self.LoRa.beginPacket()
+                self.LoRa.put(packetdata)
+                self.LoRa.endPacket()
+
+        await self.eventloop.run_in_executor(None, _safe_tx)
 
         try:
             await asyncio.wait_for(self.txdone.wait(), 5)
@@ -230,6 +204,13 @@ class SX127xInterface(Interface):
 
         except TimeoutError:
             logger.debug("Transmit timed out")
+
+        finally:
+            # Back to receiving
+            def _restore_rx():
+                with self._hw_lock:
+                    self.LoRa.request(self.LoRa.RX_CONTINUOUS)
+            await self.eventloop.run_in_executor(None, _restore_rx)
     
         self.txdone.clear()
         return self.txtime
@@ -243,5 +224,6 @@ class SX127xInterface(Interface):
         self.eventloop = asyncio.get_running_loop()
         # Start the receiver in its own thread as it's not asynchronous, make it a daemon thread so it
         # doesn't stop the program terminating
+
         self.rxthread = threading.Thread(target=self.rx_thread, daemon=True)
         self.rxthread.start()
