@@ -61,7 +61,7 @@ class SX127xInterface(Interface):
         # Config for US MeshCore
         config.set_default(get_config({
             "frequency": 910525000, "sf": 7, "bw":62500, "cr":5,
-            "txpower": 17, "airtime": 100,
+            "txpower": 13, "airtime": 100,
             # AdaFruit Bonnet SX127x for Raspberry Pi
             "spi":0, "cs": 1, "irq": 22, "reset": 25
         }))
